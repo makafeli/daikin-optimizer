@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base"
+  ],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchCurrentVersion": "!/^0/",
+      "automerge": true
+    }
+  ],
+  "schedule": ["every weekend"],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 5,
+  "rangeStrategy": "bump",
+  "semanticCommits": "enabled",
+  "dependencyDashboard": true,
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "assignees": ["@team"]
+  }
+}
