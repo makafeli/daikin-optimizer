@@ -1,234 +1,292 @@
+/**
+ * Main SettingsMatrix component
+ */
 <template>
   <v-card>
     <v-card-title class="d-flex align-center">
       Settings Matrix
       <v-spacer></v-spacer>
+      <!-- Actions -->
       <v-btn
-        icon
+        icon="mdi-refresh"
         variant="text"
-        @click="toggleLegend"
-      >
-        <v-icon>mdi-help-circle</v-icon>
-      </v-btn>
+        @click="refreshMatrix"
+        :loading="loading"
+      />
     </v-card-title>
 
-    <v-card-text>
-      <!-- Legend -->
-      <v-expand-transition>
-        <div v-show="showLegend" class="mb-4">
-          <v-chip-group>
-            <v-chip
-              v-for="category in categories"
-              :key="category.name"
-              :color="category.color"
-              label
-              text-color="white"
-            >
-              {{ category.name }}
-            </v-chip>
-          </v-chip-group>
-        </div>
-      </v-expand-transition>
+    <!-- Legend -->
+    <category-legend :categories="categoryLegend" />
 
-      <!-- Matrix Grid -->
+    <v-card-text class="pa-0">
       <div class="matrix-container">
         <!-- Column Headers -->
         <div class="matrix-header">
-          <div class="matrix-cell header"></div>
-          <div
-            v-for="col in 15"
-            :key="'col-' + col.toString(16)"
-            class="matrix-cell header"
-          >
-            {{ col.toString(16).toUpperCase() }}
-          </div>
+          <matrix-cell
+            v-for="header in columnHeaders"
+            :key="header"
+            :is-header="true"
+            :header-value="header"
+          />
         </div>
 
         <!-- Matrix Rows -->
         <div
-          v-for="row in 15"
-          :key="'row-' + row.toString(16)"
+          v-for="row in matrixRows"
+          :key="row.id"
           class="matrix-row"
         >
-          <div class="matrix-cell header">
-            {{ row.toString(16).toUpperCase() }}
-          </div>
-          <div
-            v-for="col in 15"
-            :key="'cell-' + row.toString(16) + col.toString(16)"
-            class="matrix-cell"
-            :class="getCellClass(row, col)"
-            @click="openSettingDialog(row, col)"
-          >
-            {{ getSettingValue(row, col) }}
-          </div>
+          <!-- Row Header -->
+          <matrix-cell
+            :is-header="true"
+            :header-value="row.id"
+          />
+
+          <!-- Row Cells -->
+          <matrix-cell
+            v-for="cell in row.cells"
+            :key="cell.code"
+            :cell="cell"
+            :show-tooltip="config.showTooltips"
+            @cell-click="handleCellClick"
+            @cell-hover="handleCellHover"
+            @cell-leave="handleCellLeave"
+          />
         </div>
       </div>
     </v-card-text>
 
     <!-- Setting Edit Dialog -->
-    <v-dialog
-      v-model="dialog"
-      max-width="500px"
+    <setting-dialog
+      v-model="showDialog"
+      :setting="selectedSetting?.setting"
+      :current-value="selectedSetting?.value"
+      :validation-error="selectedSetting?.validationError"
+      @save="handleSettingSave"
+      @cancel="handleSettingCancel"
+    />
+
+    <!-- Hover Preview -->
+    <v-menu
+      v-model="showPreview"
+      location="top"
+      :position-x="previewX"
+      :position-y="previewY"
+      transition="fade-transition"
+      open-delay="500"
     >
-      <v-card v-if="selectedSetting">
-        <v-card-title>
-          Edit Setting {{ selectedSetting.id }}
+      <v-card
+        v-if="hoveredSetting"
+        width="300"
+        elevation="4"
+      >
+        <v-card-title class="text-subtitle-1">
+          {{ hoveredSetting.setting.name }}
         </v-card-title>
         <v-card-text>
-          <v-text-field
-            v-model="selectedSetting.value"
-            :label="selectedSetting.description"
-            :hint="selectedSetting.range"
-            persistent-hint
-            @input="validateSetting"
-          ></v-text-field>
-          <v-alert
-            v-if="validationError"
-            type="error"
-            class="mt-2"
-            density="compact"
-          >
-            {{ validationError }}
-          </v-alert>
+          <div class="text-body-2">{{ hoveredSetting.setting.description }}</div>
+          <v-divider class="my-2"></v-divider>
+          <div class="d-flex justify-space-between">
+            <span class="text-caption">Type: {{ hoveredSetting.setting.type }}</span>
+            <span class="text-caption">Access: {{ hoveredSetting.setting.access }}</span>
+          </div>
         </v-card-text>
-        <v-card-actions>
-          <v-spacer></v-spacer>
-          <v-btn
-            color="primary"
-            text
-            @click="dialog = false"
-          >
-            Cancel
-          </v-btn>
-          <v-btn
-            color="primary"
-            @click="saveSetting"
-            :disabled="!!validationError"
-          >
-            Save
-          </v-btn>
-        </v-card-actions>
       </v-card>
-    </v-dialog>
+    </v-menu>
   </v-card>
 </template>
 
-<script setup>
-import { ref, computed } from 'vue'
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useSettingsStore } from '@/store/settingsStore'
+import { SettingCategory } from '@/types'
+import type { GridCell, GridSection, CategoryLegend, MatrixConfig } from './types'
+import MatrixCell from './components/MatrixCell.vue'
+import CategoryLegend from './components/CategoryLegend.vue'
+import SettingDialog from './components/SettingDialog.vue'
 
-const showLegend = ref(false)
-const dialog = ref(false)
-const selectedSetting = ref(null)
-const validationError = ref('')
+// Props & Config
+const props = withDefaults(defineProps<{
+  config?: Partial<MatrixConfig>
+}>(), {
+  config: () => ({
+    allowDirectEdit: true,
+    showValidation: true,
+    showModified: true,
+    showTooltips: true
+  })
+})
 
-// Sample categories - these would come from your data store
-const categories = ref([
-  { name: 'Temperature', color: 'red' },
-  { name: 'Operation Mode', color: 'blue' },
-  { name: 'System Config', color: 'green' },
-  { name: 'Sensor Settings', color: 'purple' }
+// Store
+const settingsStore = useSettingsStore()
+
+// State
+const loading = ref(false)
+const showDialog = ref(false)
+const showPreview = ref(false)
+const previewX = ref(0)
+const previewY = ref(0)
+const selectedSetting = ref<GridCell | null>(null)
+const hoveredSetting = ref<GridCell | null>(null)
+
+// Column headers (0-F)
+const columnHeaders = computed(() => 
+  Array.from({ length: 16 }, (_, i) => i.toString(16).toUpperCase())
+)
+
+// Matrix data structure
+const matrixRows = computed(() => {
+  const rows: GridSection[] = []
+  
+  // Create 16 rows (0-F)
+  for (let i = 0; i < 16; i++) {
+    const rowId = i.toString(16).toUpperCase()
+    const cells: GridCell[] = []
+
+    // Create 16 columns for each row
+    for (let j = 0; j < 16; j++) {
+      const colId = j.toString(16).toUpperCase()
+      const code = `${rowId}${colId}`
+      const setting = settingsStore.getSettingByCode(code)
+
+      if (setting) {
+        cells.push({
+          code,
+          value: settingsStore.currentSettings[code] || '00',
+          setting,
+          isValid: !settingsStore.validationErrors[code],
+          isModified: settingsStore.currentSettings[code] !== settingsStore.originalSettings[code],
+          validationError: settingsStore.validationErrors[code]?.errors?.[0]
+        })
+      }
+    }
+
+    if (cells.length > 0) {
+      rows.push({
+        id: rowId,
+        title: `Row ${rowId}`,
+        cells,
+        category: cells[0].setting.category
+      })
+    }
+  }
+
+  return rows
+})
+
+// Category legend data
+const categoryLegend = computed<CategoryLegend[]>(() => [
+  {
+    name: SettingCategory.ROOM,
+    color: 'primary',
+    icon: 'mdi-home'
+  },
+  {
+    name: SettingCategory.MAIN_ZONE,
+    color: 'secondary',
+    icon: 'mdi-thermostat'
+  },
+  {
+    name: SettingCategory.ADDITIONAL_ZONE,
+    color: 'success',
+    icon: 'mdi-thermostat-box'
+  },
+  {
+    name: SettingCategory.SPACE_HEATING_COOLING,
+    color: 'warning',
+    icon: 'mdi-hvac'
+  },
+  {
+    name: SettingCategory.TANK,
+    color: 'info',
+    icon: 'mdi-water-boiler'
+  },
+  {
+    name: SettingCategory.USER_SETTINGS,
+    color: 'error',
+    icon: 'mdi-account-cog'
+  },
+  {
+    name: SettingCategory.INSTALLER_SETTINGS,
+    color: 'grey',
+    icon: 'mdi-wrench'
+  }
 ])
 
-// Sample matrix data - this would come from your data store
-const matrixData = ref({})
-
-const toggleLegend = () => {
-  showLegend.value = !showLegend.value
-}
-
-const getCellClass = (row, col) => {
-  // Implementation would determine cell category and return appropriate styling
-  return {
-    'temperature': row < 4,
-    'operation-mode': row >= 4 && row < 8,
-    'system-config': row >= 8 && row < 12,
-    'sensor-settings': row >= 12
+// Methods
+const refreshMatrix = async () => {
+  loading.value = true
+  try {
+    await settingsStore.validateAllSettings()
+  } finally {
+    loading.value = false
   }
 }
 
-const getSettingValue = (row, col) => {
-  const id = `${row.toString(16)}${col.toString(16)}`.toUpperCase()
-  return matrixData.value[id] || '00'
+const handleCellClick = (cell: GridCell) => {
+  if (!props.config.allowDirectEdit) return
+  
+  selectedSetting.value = cell
+  showDialog.value = true
 }
 
-const openSettingDialog = (row, col) => {
-  const id = `${row.toString(16)}${col.toString(16)}`.toUpperCase()
-  selectedSetting.value = {
-    id,
-    value: matrixData.value[id] || '00',
-    description: 'Sample Setting Description',
-    range: 'Valid range: 00-FF'
-  }
-  dialog.value = true
+const handleCellHover = (cell: GridCell, event: MouseEvent) => {
+  if (!props.config.showTooltips) return
+
+  hoveredSetting.value = cell
+  previewX.value = event.clientX
+  previewY.value = event.clientY
+  showPreview.value = true
 }
 
-const validateSetting = (value) => {
-  if (!value.match(/^[0-9A-F]{2}$/i)) {
-    validationError.value = 'Value must be a 2-digit hexadecimal number (00-FF)'
-  } else {
-    validationError.value = ''
-  }
+const handleCellLeave = () => {
+  showPreview.value = false
+  hoveredSetting.value = null
 }
 
-const saveSetting = () => {
-  if (!validationError.value) {
-    matrixData.value[selectedSetting.value.id] = selectedSetting.value.value.toUpperCase()
-    dialog.value = false
+const handleSettingSave = async (value: string) => {
+  if (!selectedSetting.value) return
+
+  const result = await settingsStore.updateSetting(
+    selectedSetting.value.code,
+    value
+  )
+
+  if (!result.success) {
+    // Handle error
+    console.error('Failed to update setting:', result.errors)
   }
+
+  selectedSetting.value = null
+  showDialog.value = false
 }
+
+const handleSettingCancel = () => {
+  selectedSetting.value = null
+  showDialog.value = false
+}
+
+// Lifecycle
+onMounted(() => {
+  refreshMatrix()
+})
 </script>
 
 <style scoped>
 .matrix-container {
   overflow-x: auto;
+  padding: 1rem;
 }
 
 .matrix-header {
   display: flex;
   position: sticky;
   top: 0;
-  background: var(--v-theme-background);
+  z-index: 1;
+  background: rgb(var(--v-theme-surface));
 }
 
 .matrix-row {
   display: flex;
-}
-
-.matrix-cell {
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #ccc;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.matrix-cell:hover:not(.header) {
-  background-color: rgba(var(--v-theme-primary), 0.1);
-}
-
-.matrix-cell.header {
-  background-color: rgba(var(--v-theme-primary), 0.05);
-  font-weight: bold;
-  cursor: default;
-}
-
-.temperature {
-  background-color: rgba(255, 0, 0, 0.1);
-}
-
-.operation-mode {
-  background-color: rgba(0, 0, 255, 0.1);
-}
-
-.system-config {
-  background-color: rgba(0, 255, 0, 0.1);
-}
-
-.sensor-settings {
-  background-color: rgba(128, 0, 128, 0.1);
 }
 </style>

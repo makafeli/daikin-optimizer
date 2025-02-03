@@ -1,206 +1,299 @@
-&lt;template>
-  &lt;v-card class="mb-4">
-    &lt;v-card-title class="d-flex align-center">
+/**
+ * Main HeatPumpInfo component
+ */
+<template>
+  <v-card>
+    <v-card-title class="d-flex align-center">
       Heat Pump Information
-      &lt;v-spacer>&lt;/v-spacer>
-      &lt;v-btn
+      <v-spacer></v-spacer>
+      <v-btn
         icon="mdi-refresh"
         variant="text"
-        @click="refreshInfo"
         :loading="loading"
-      />
-    &lt;/v-card-title>
+        @click="refreshInfo"
+      ></v-btn>
+    </v-card-title>
 
-    &lt;v-card-text>
-      &lt;v-list>
-        &lt;!-- Model Details -->
-        &lt;v-list-subheader>Model Details&lt;/v-list-subheader>
-        &lt;v-list-item>
-          &lt;template v-slot:prepend>
-            &lt;v-icon>mdi-information&lt;/v-icon>
-          &lt;/template>
-          &lt;v-list-item-title>{{ systemInfo.model || 'Not Available' }}&lt;/v-list-item-title>
-          &lt;v-list-item-subtitle>Model Number&lt;/v-list-item-subtitle>
-        &lt;/v-list-item>
+    <v-card-text>
+      <v-row>
+        <!-- System Specifications -->
+        <v-col cols="12" md="4">
+          <system-specs :specifications="systemSpecs" />
+        </v-col>
 
-        &lt;!-- System Specifications -->
-        &lt;v-list-subheader>System Specifications&lt;/v-list-subheader>
-        &lt;v-list-item v-for="(value, key) in systemSpecs" :key="key">
-          &lt;template v-slot:prepend>
-            &lt;v-icon>{{ getSpecIcon(key) }}&lt;/v-icon>
-          &lt;/template>
-          &lt;v-list-item-title>{{ value }}&lt;/v-list-item-title>
-          &lt;v-list-item-subtitle>{{ formatSpecLabel(key) }}&lt;/v-list-item-subtitle>
-        &lt;/v-list-item>
+        <!-- Status Indicators -->
+        <v-col cols="12" md="8">
+          <status-indicators
+            :indicators="statusIndicators"
+            :loading="loading"
+            @refresh="refreshInfo"
+          />
+        </v-col>
 
-        &lt;!-- Zone Configuration -->
-        &lt;v-list-subheader>Zone Configuration&lt;/v-list-subheader>
-        &lt;v-list-item v-for="zone in zones" :key="zone.id">
-          &lt;template v-slot:prepend>
-            &lt;v-icon>mdi-thermostat&lt;/v-icon>
-          &lt;/template>
-          &lt;v-list-item-title>{{ zone.name }}&lt;/v-list-item-title>
-          &lt;v-list-item-subtitle>
-            {{ zone.type }} - {{ zone.setpoint }}°C
-          &lt;/v-list-item-subtitle>
-        &lt;/v-list-item>
+        <!-- Zone Information -->
+        <v-col cols="12">
+          <zone-info :zones="zones" />
+        </v-col>
 
-        &lt;!-- Performance Metrics -->
-        &lt;v-list-subheader>Performance Metrics&lt;/v-list-subheader>
-        &lt;v-list-item v-for="metric in performanceMetrics" :key="metric.id">
-          &lt;template v-slot:prepend>
-            &lt;v-icon>{{ getMetricIcon(metric.type) }}&lt;/v-icon>
-          &lt;/template>
-          &lt;v-list-item-title>{{ metric.value }}{{ metric.unit }}&lt;/v-list-item-title>
-          &lt;v-list-item-subtitle>{{ metric.label }}&lt;/v-list-item-subtitle>
-        &lt;/v-list-item>
-      &lt;/v-list>
+        <!-- Performance Metrics -->
+        <v-col cols="12">
+          <performance-metrics
+            :metrics="performanceMetrics"
+            :show-chart="config.showCharts"
+            @update:duration="updateChartDuration"
+          />
+        </v-col>
+      </v-row>
+    </v-card-text>
 
-      &lt;!-- Current Status -->
-      &lt;v-card-subtitle class="mt-4">Current Status&lt;/v-card-subtitle>
-      &lt;v-row dense>
-        &lt;v-col v-for="status in currentStatus" :key="status.id" cols="6">
-          &lt;v-chip
-            :color="status.color"
-            :prepend-icon="status.icon"
-          >
-            {{ status.label }}: {{ status.value }}
-          &lt;/v-chip>
-        &lt;/v-col>
-      &lt;/v-row>
-    &lt;/v-card-text>
-  &lt;/v-card>
-&lt;/template>
+    <!-- Error Alert -->
+    <v-alert
+      v-if="error"
+      type="error"
+      class="ma-4"
+      closable
+      @click:close="error = null"
+    >
+      {{ error }}
+    </v-alert>
+  </v-card>
+</template>
 
-&lt;script setup>
-import { ref, computed } from 'vue'
+<script setup lang="ts">
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useSettingsStore } from '@/store/settingsStore'
+import { useDaikinApi } from '@/api/composable'
+import type {
+  SystemSpecification,
+  ZoneInfo,
+  PerformanceMetric,
+  StatusIndicator,
+  InfoPanelConfig
+} from './types'
+import SystemSpecs from './components/SystemSpecs.vue'
+import StatusIndicators from './components/StatusIndicators.vue'
+import ZoneInfo from './components/ZoneInfo.vue'
+import PerformanceMetrics from './components/PerformanceMetrics.vue'
 
+// Props
+const props = withDefaults(defineProps<{
+  config?: Partial<InfoPanelConfig>
+}>(), {
+  config: () => ({
+    refreshInterval: 30000, // 30 seconds
+    showCharts: true,
+    showTrends: true,
+    chartDuration: '1h'
+  })
+})
+
+// Store & API
 const settingsStore = useSettingsStore()
+const api = useDaikinApi()
+
+// State
 const loading = ref(false)
+const error = ref<string | null>(null)
+const refreshTimer = ref<number | null>(null)
 
-// Computed properties
-const systemInfo = computed(() => settingsStore.systemInfo)
+// Computed
+const systemSpecs = computed<SystemSpecification[]>(() => {
+  const status = settingsStore.systemStatus
+  if (!status) return []
 
-const systemSpecs = computed(() => ({
-  'heatingCapacity': '14 kW',
-  'coolingCapacity': '18 kW',
-  'backupHeater': '9 kW',
-  'tankVolume': '230 L',
-}))
+  return [
+    {
+      id: 'model',
+      label: 'Model',
+      value: settingsStore.systemInfo.model,
+      icon: 'mdi-information',
+      color: 'primary'
+    },
+    {
+      id: 'heating-capacity',
+      label: 'Heating Capacity',
+      value: 14,
+      unit: 'kW',
+      icon: 'mdi-heating-coil',
+      color: 'error'
+    },
+    {
+      id: 'cooling-capacity',
+      label: 'Cooling Capacity',
+      value: 18,
+      unit: 'kW',
+      icon: 'mdi-snowflake',
+      color: 'info'
+    },
+    {
+      id: 'tank-volume',
+      label: 'Tank Volume',
+      value: 230,
+      unit: 'L',
+      icon: 'mdi-water-boiler',
+      color: 'primary'
+    }
+  ]
+})
 
-const zones = computed(() => [
-  {
-    id: 1,
-    name: 'Main Zone',
-    type: 'Underfloor Heating',
-    setpoint: settingsStore.currentSettings['2-0C'] || 'N/A'
-  },
-  {
-    id: 2,
-    name: 'Additional Zone',
-    type: 'Radiator',
-    setpoint: settingsStore.currentSettings['2-0D'] || 'N/A'
-  }
-])
+const statusIndicators = computed<StatusIndicator[]>(() => {
+  const status = settingsStore.systemStatus
+  const metrics = settingsStore.metrics
+  if (!status || !metrics) return []
 
-const performanceMetrics = computed(() => [
-  {
-    id: 1,
-    type: 'cop',
-    label: 'Current COP',
-    value: '4.5',
-    unit: '',
-    icon: 'mdi-lightning-bolt'
-  },
-  {
-    id: 2,
-    type: 'power',
-    label: 'Power Consumption',
-    value: '2.1',
-    unit: 'kW',
-    icon: 'mdi-flash'
-  }
-])
+  return [
+    {
+      id: 'operation',
+      label: 'Operation Mode',
+      value: status.mode,
+      status: status.active ? 'normal' : 'inactive',
+      icon: 'mdi-power'
+    },
+    {
+      id: 'outdoor-temp',
+      label: 'Outdoor Temperature',
+      value: metrics.temperatures.outdoor,
+      unit: '°C',
+      status: 'normal',
+      icon: 'mdi-thermometer'
+    },
+    {
+      id: 'tank-temp',
+      label: 'Tank Temperature',
+      value: metrics.temperatures.tank || 0,
+      unit: '°C',
+      status: 'normal',
+      icon: 'mdi-water'
+    },
+    {
+      id: 'flow-rate',
+      label: 'Flow Rate',
+      value: metrics.flow.rate,
+      unit: 'L/min',
+      status: 'normal',
+      icon: 'mdi-water-pump'
+    },
+    {
+      id: 'pressure',
+      label: 'System Pressure',
+      value: metrics.pressure,
+      unit: 'bar',
+      status: 'normal',
+      icon: 'mdi-gauge'
+    },
+    {
+      id: 'cop',
+      label: 'Current COP',
+      value: metrics.power.cop,
+      status: 'normal',
+      icon: 'mdi-lightning-bolt'
+    }
+  ]
+})
 
-const currentStatus = computed(() => [
-  {
-    id: 1,
-    label: 'Operation',
-    value: 'Heating',
-    color: 'red',
-    icon: 'mdi-thermometer-high'
-  },
-  {
-    id: 2,
-    label: 'Tank',
-    value: '58°C',
-    color: 'blue',
-    icon: 'mdi-water'
-  },
-  {
-    id: 3,
-    label: 'Outdoor',
-    value: '12°C',
-    color: 'green',
-    icon: 'mdi-thermometer'
-  },
-  {
-    id: 4,
-    label: 'Flow Rate',
-    value: '15 L/min',
-    color: 'purple',
-    icon: 'mdi-water-pump'
-  }
-])
+const zones = computed<ZoneInfo[]>(() => {
+  const status = settingsStore.systemStatus
+  if (!status) return []
+
+  return [
+    {
+      id: 'main',
+      name: 'Main Zone',
+      type: 'Underfloor Heating',
+      temperature: 22.5,
+      targetTemperature: 23.0,
+      humidity: 45,
+      status: 'active'
+    },
+    {
+      id: 'additional',
+      name: 'Additional Zone',
+      type: 'Radiator',
+      temperature: 21.8,
+      targetTemperature: 22.0,
+      status: 'idle'
+    }
+  ]
+})
+
+const performanceMetrics = computed<PerformanceMetric[]>(() => {
+  const metrics = settingsStore.metrics
+  if (!metrics) return []
+
+  return [
+    {
+      id: 'power-consumption',
+      label: 'Power Consumption',
+      value: metrics.power.consumption,
+      unit: 'kW',
+      icon: 'mdi-flash',
+      color: 'error',
+      trend: 'down',
+      change: -5.2
+    },
+    {
+      id: 'cop-trend',
+      label: 'COP',
+      value: metrics.power.cop,
+      unit: '',
+      icon: 'mdi-lightning-bolt',
+      color: 'success',
+      trend: 'up',
+      change: 2.8
+    },
+    {
+      id: 'flow-temperature',
+      label: 'Flow Temperature',
+      value: metrics.flow.temperature,
+      unit: '°C',
+      icon: 'mdi-thermometer',
+      color: 'primary',
+      trend: 'stable'
+    }
+  ]
+})
 
 // Methods
-const getSpecIcon = (type) => {
-  const icons = {
-    heatingCapacity: 'mdi-heating-coil',
-    coolingCapacity: 'mdi-snowflake',
-    backupHeater: 'mdi-radiator',
-    tankVolume: 'mdi-water-boiler'
-  }
-  return icons[type] || 'mdi-help'
-}
-
-const getMetricIcon = (type) => {
-  const icons = {
-    cop: 'mdi-lightning-bolt',
-    power: 'mdi-flash',
-    temperature: 'mdi-thermometer',
-    pressure: 'mdi-gauge'
-  }
-  return icons[type] || 'mdi-help'
-}
-
-const formatSpecLabel = (key) => {
-  return key
-    .replace(/([A-Z])/g, ' $1')
-    .replace(/^./, str => str.toUpperCase())
-}
-
 const refreshInfo = async () => {
   loading.value = true
+  error.value = null
+
   try {
-    // Here you would typically fetch updated info from the heat pump
-    await new Promise(resolve => setTimeout(resolve, 1000)) // Simulate API call
-    // Update store with new data
-  } catch (error) {
-    console.error('Failed to refresh heat pump info:', error)
+    const status = await api.getStatus()
+    if (status) {
+      settingsStore.updateSystemStatus(status)
+    }
+  } catch (err) {
+    error.value = 'Failed to refresh system information'
+    console.error('Error refreshing info:', err)
   } finally {
     loading.value = false
   }
 }
-&lt;/script>
 
-&lt;style scoped>
-.v-list-item {
-  min-height: 48px;
+const updateChartDuration = (duration: InfoPanelConfig['chartDuration']) => {
+  // Implementation for updating chart duration
+  console.log('Updating chart duration:', duration)
 }
 
-.v-chip {
-  width: 100%;
+const startRefreshTimer = () => {
+  refreshTimer.value = window.setInterval(refreshInfo, props.config.refreshInterval)
 }
-&lt;/style>
+
+const stopRefreshTimer = () => {
+  if (refreshTimer.value) {
+    clearInterval(refreshTimer.value)
+    refreshTimer.value = null
+  }
+}
+
+// Lifecycle
+onMounted(() => {
+  refreshInfo()
+  startRefreshTimer()
+})
+
+onBeforeUnmount(() => {
+  stopRefreshTimer()
+})
+</script>
